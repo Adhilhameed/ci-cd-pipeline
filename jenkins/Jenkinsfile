@@ -1,0 +1,227 @@
+// ╔══════════════════════════════════════════════════════════════╗
+// ║          Jenkins CI/CD Pipeline – React App to AWS           ║
+// ║   Stages: Lint → Test → Build → Dockerize → Deploy (ECS)    ║
+// ╚══════════════════════════════════════════════════════════════╝
+
+pipeline {
+    agent any
+
+    // ── Environment Variables ────────────────────────────────────
+    environment {
+        APP_NAME        = 'react-cicd-app'
+        AWS_REGION      = 'us-east-1'
+        ECR_REGISTRY    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        IMAGE_NAME      = "${ECR_REGISTRY}/${APP_NAME}"
+        IMAGE_TAG       = "${BUILD_NUMBER}-${GIT_COMMIT.take(7)}"
+        ECS_CLUSTER     = 'production-cluster'
+        ECS_SERVICE     = 'react-app-service'
+        CONTAINER_NAME  = 'react-app'
+
+        // Jenkins credential IDs (configure these in Jenkins > Credentials)
+        AWS_CREDENTIALS = 'aws-credentials'
+    }
+
+    // ── Build Options ────────────────────────────────────────────
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+        ansiColor('xterm')
+    }
+
+    // ── Triggers ─────────────────────────────────────────────────
+    triggers {
+        // Poll GitHub every 5 minutes (or use a GitHub webhook instead)
+        pollSCM('H/5 * * * *')
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  STAGES
+    // ════════════════════════════════════════════════════════════
+    stages {
+
+        // ── 1. CHECKOUT ─────────────────────────────────────────
+        stage('Checkout') {
+            steps {
+                echo "📥 Checking out branch: ${GIT_BRANCH}"
+                checkout scm
+            }
+        }
+
+        // ── 2. INSTALL DEPENDENCIES ──────────────────────────────
+        stage('Install Dependencies') {
+            steps {
+                dir('app') {
+                    echo '📦 Installing npm dependencies...'
+                    sh 'npm ci'
+                }
+            }
+        }
+
+        // ── 3. LINT ──────────────────────────────────────────────
+        stage('Lint') {
+            steps {
+                dir('app') {
+                    echo '🔍 Running ESLint...'
+                    sh 'npm run lint'
+                }
+            }
+            post {
+                failure {
+                    echo '❌ Lint failed! Fix ESLint errors before merging.'
+                }
+                success {
+                    echo '✅ Lint passed!'
+                }
+            }
+        }
+
+        // ── 4. TEST ───────────────────────────────────────────────
+        stage('Test') {
+            steps {
+                dir('app') {
+                    echo '🧪 Running tests with coverage...'
+                    sh 'npm test'
+                }
+            }
+            post {
+                always {
+                    // Publish JUnit test results in Jenkins UI
+                    junit allowEmptyResults: true,
+                          testResults: 'app/coverage/junit.xml'
+
+                    // Publish coverage report
+                    publishHTML(target: [
+                        reportDir:   'app/coverage/lcov-report',
+                        reportFiles: 'index.html',
+                        reportName:  'Coverage Report',
+                        keepAll:     true
+                    ])
+                }
+                failure {
+                    echo '❌ Tests failed! Pipeline stopped.'
+                }
+                success {
+                    echo '✅ All tests passed!'
+                }
+            }
+        }
+
+        // ── 5. BUILD REACT APP ───────────────────────────────────
+        stage('Build React App') {
+            steps {
+                dir('app') {
+                    echo '🏗️  Building React production bundle...'
+                    sh "npm run build"
+                    sh 'ls -lh build/'
+                }
+            }
+            post {
+                success {
+                    archiveArtifacts artifacts: 'app/build/**/*',
+                                     fingerprint: true
+                }
+            }
+        }
+
+        // ── 6. BUILD & PUSH DOCKER IMAGE ─────────────────────────
+        stage('Build & Push Docker Image') {
+            steps {
+                dir('app') {
+                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding',
+                                      credentialsId: AWS_CREDENTIALS]]) {
+                        script {
+                            echo "🐳 Building Docker image: ${IMAGE_NAME}:${IMAGE_TAG}"
+
+                            // Authenticate to AWS ECR
+                            sh """
+                                aws ecr get-login-password --region ${AWS_REGION} \
+                                  | docker login --username AWS \
+                                                 --password-stdin ${ECR_REGISTRY}
+                            """
+
+                            // Build multi-stage Docker image
+                            sh """
+                                docker build \
+                                  --build-arg BUILD_NUMBER=${BUILD_NUMBER} \
+                                  --tag ${IMAGE_NAME}:${IMAGE_TAG} \
+                                  --tag ${IMAGE_NAME}:latest \
+                                  --cache-from ${IMAGE_NAME}:latest \
+                                  .
+                            """
+
+                            // Push both tags
+                            sh "docker push ${IMAGE_NAME}:${IMAGE_TAG}"
+                            sh "docker push ${IMAGE_NAME}:latest"
+
+                            echo "✅ Image pushed: ${IMAGE_NAME}:${IMAGE_TAG}"
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── 7. DEPLOY TO AWS ECS ─────────────────────────────────
+        stage('Deploy to AWS ECS') {
+            // Only deploy from main branch
+            when {
+                branch 'main'
+            }
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding',
+                                  credentialsId: AWS_CREDENTIALS]]) {
+                    script {
+                        echo "🚀 Deploying ${IMAGE_TAG} to ECS cluster: ${ECS_CLUSTER}"
+
+                        // Update ECS task definition with the new image
+                        sh """
+                            bash scripts/deploy.sh \
+                              ${AWS_REGION} \
+                              ${ECS_CLUSTER} \
+                              ${ECS_SERVICE} \
+                              ${CONTAINER_NAME} \
+                              ${IMAGE_NAME}:${IMAGE_TAG}
+                        """
+
+                        echo "✅ Deployment complete!"
+                        echo "🌐 App available at: http://\$(aws elbv2 describe-load-balancers \
+                              --region ${AWS_REGION} \
+                              --query 'LoadBalancers[0].DNSName' \
+                              --output text)"
+                    }
+                }
+            }
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  POST-PIPELINE ACTIONS
+    // ════════════════════════════════════════════════════════════
+    post {
+        always {
+            echo "🧹 Cleaning up local Docker images..."
+            sh "docker rmi ${IMAGE_NAME}:${IMAGE_TAG} || true"
+            sh "docker rmi ${IMAGE_NAME}:latest || true"
+            cleanWs()
+        }
+        success {
+            echo """
+            ╔══════════════════════════════════════╗
+            ║  ✅  PIPELINE SUCCEEDED  ✅           ║
+            ║  Build: ${BUILD_NUMBER}               ║
+            ║  Image: ${IMAGE_TAG}                  ║
+            ╚══════════════════════════════════════╝
+            """
+        }
+        failure {
+            echo """
+            ╔══════════════════════════════════════╗
+            ║  ❌  PIPELINE FAILED  ❌              ║
+            ║  Build: ${BUILD_NUMBER}               ║
+            ║  Check logs above for details.        ║
+            ╚══════════════════════════════════════╝
+            """
+            // Optional: add emailext or Slack plugin notification here
+        }
+    }
+}
