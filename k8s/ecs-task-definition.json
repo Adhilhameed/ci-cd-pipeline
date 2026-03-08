@@ -4,11 +4,11 @@
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "256",
   "memory": "512",
-  "executionRoleArn": "arn:aws:iam::YOUR_ACCOUNT_ID:role/ecsTaskExecutionRole",
+  "executionRoleArn": "arn:aws:iam::096293429935:role/ecsTaskExecutionRole",
   "containerDefinitions": [
     {
       "name": "react-app",
-      "image": "YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/react-cicd-app:latest",
+      "image": "096293429935.dkr.ecr.us-east-1.amazonaws.com/react-cicd-app:latest",
       "portMappings": [
         {
           "containerPort": 80,
