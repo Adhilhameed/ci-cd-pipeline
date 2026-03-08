@@ -7,7 +7,7 @@ WORKDIR /app
 
 # Copy dependency files first (layer caching)
 COPY package*.json ./
-RUN npm ci --production=false
+RUN npm install 
 
 # Pass build number from Jenkins into the React build
 ARG BUILD_NUMBER=local
