@@ -6,7 +6,7 @@ function App() {
   return (
     <div className="App">
       <header className="App-header">
-        <h1>CI/CD Pipeline Demo App</h1>
+        <h1>CI/CD Pipeline Demo App V2</h1>
         <p>Deployed via Jenkins → Docker → AWS</p>
         <p>Build #{process.env.REACT_APP_BUILD_NUMBER || 'local'}</p>
         <button onClick={() => setCount(count + 1)}>
